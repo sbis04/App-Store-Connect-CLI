@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -94,6 +95,10 @@ linkage IDs only; cost scales with the checked groups and their build page count
 A complete lookup with no memberships prints an empty groups array and exits 0.
 If an inverse relationship cannot be read, available matches and failures are
 printed with complete=false and the command exits nonzero.
+
+GET /v1/apps/{id}/betaGroups accepts only a page limit, so --internal and
+--external are served by GET /v1/betaGroups with filter[app]. The filter is
+applied by App Store Connect, and --limit is the page size of matching groups.
 
 Examples:
   asc testflight beta-groups list --app "APP_ID"
@@ -211,96 +216,36 @@ Examples:
 				asc.WithBetaGroupsLimit(*limit),
 				asc.WithBetaGroupsNextURL(*next),
 			}
-
-			if *global {
-				if internalFilter != nil {
-					opts = append(opts, asc.WithBetaGroupsIsInternal(*internalFilter))
-				}
-
-				if *paginate {
-					paginateOpts := append(opts, asc.WithBetaGroupsLimit(200))
-					groups, err := shared.PaginateWithSpinner(
-						requestCtx,
-						func(ctx context.Context) (asc.PaginatedResponse, error) {
-							return client.ListBetaGroups(ctx, paginateOpts...)
-						},
-						func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-							return client.ListBetaGroups(ctx, asc.WithBetaGroupsNextURL(nextURL))
-						},
-					)
-					if err != nil {
-						return fmt.Errorf("beta-groups list: %w", err)
-					}
-
-					return shared.PrintOutput(groups, *output.Output, *output.Pretty)
-				}
-
-				groups, err := client.ListBetaGroups(requestCtx, opts...)
-				if err != nil {
-					return fmt.Errorf("beta-groups list: failed to fetch: %w", err)
-				}
-
-				return shared.PrintOutput(groups, *output.Output, *output.Pretty)
+			if internalFilter != nil {
+				opts = append(opts, asc.WithBetaGroupsIsInternal(*internalFilter))
 			}
 
-			// The app-scoped endpoint /v1/apps/{id}/betaGroups does not accept
-			// filter[isInternalGroup], so we apply the filter client-side.
-			if internalFilter != nil {
-				var groups *asc.BetaGroupsResponse
+			// GET /v1/apps/{id}/betaGroups accepts only limit and
+			// fields[betaGroups]. GET /v1/betaGroups accepts filter[app]
+			// alongside filter[isInternalGroup], so any request that needs a
+			// server-side filter is routed there instead of being narrowed
+			// client-side after walking every page.
+			useTopLevelEndpoint := *global || internalFilter != nil
+			if useTopLevelEndpoint && !*global && resolvedAppID != "" {
+				opts = append(opts, asc.WithBetaGroupsApps([]string{resolvedAppID}))
+			}
 
-				if *paginate {
-					paginateOpts := append(opts, asc.WithBetaGroupsLimit(200))
-					resp, err := shared.PaginateWithSpinner(
-						requestCtx,
-						func(ctx context.Context) (asc.PaginatedResponse, error) {
-							return client.GetBetaGroups(ctx, resolvedAppID, paginateOpts...)
-						},
-						func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-							return client.GetBetaGroups(ctx, resolvedAppID, asc.WithBetaGroupsNextURL(nextURL))
-						},
-					)
-					if err != nil {
-						return fmt.Errorf("beta-groups list: %w", err)
-					}
-					var ok bool
-					groups, ok = resp.(*asc.BetaGroupsResponse)
-					if !ok {
-						return fmt.Errorf("beta-groups list: unexpected response type %T", resp)
-					}
-				} else {
-					// To apply the filter correctly, fetch all pages even without --paginate.
-					paginateOpts := append(opts, asc.WithBetaGroupsLimit(200))
-					firstPage, err := client.GetBetaGroups(requestCtx, resolvedAppID, paginateOpts...)
-					if err != nil {
-						return fmt.Errorf("beta-groups list: failed to fetch: %w", err)
-					}
-					resp, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-						return client.GetBetaGroups(ctx, resolvedAppID, asc.WithBetaGroupsNextURL(nextURL))
-					})
-					if err != nil {
-						return fmt.Errorf("beta-groups list: %w", err)
-					}
-					var ok bool
-					groups, ok = resp.(*asc.BetaGroupsResponse)
-					if !ok {
-						return fmt.Errorf("beta-groups list: unexpected response type %T", resp)
-					}
+			listPage := func(ctx context.Context, pageOpts ...asc.BetaGroupsOption) (asc.PaginatedResponse, error) {
+				if useTopLevelEndpoint {
+					return client.ListBetaGroups(ctx, pageOpts...)
 				}
-
-				filtered := filterBetaGroupsByInternal(groups, *internalFilter, *limit)
-
-				return shared.PrintOutput(&filtered, *output.Output, *output.Pretty)
+				return client.GetBetaGroups(ctx, resolvedAppID, pageOpts...)
 			}
 
 			if *paginate {
-				paginateOpts := append(opts, asc.WithBetaGroupsLimit(200))
+				paginateOpts := append(slices.Clone(opts), asc.WithBetaGroupsLimit(200))
 				groups, err := shared.PaginateWithSpinner(
 					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
-						return client.GetBetaGroups(ctx, resolvedAppID, paginateOpts...)
+						return listPage(ctx, paginateOpts...)
 					},
 					func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-						return client.GetBetaGroups(ctx, resolvedAppID, asc.WithBetaGroupsNextURL(nextURL))
+						return listPage(ctx, asc.WithBetaGroupsNextURL(nextURL))
 					},
 				)
 				if err != nil {
@@ -310,7 +255,7 @@ Examples:
 				return shared.PrintOutput(groups, *output.Output, *output.Pretty)
 			}
 
-			groups, err := client.GetBetaGroups(requestCtx, resolvedAppID, opts...)
+			groups, err := listPage(requestCtx, opts...)
 			if err != nil {
 				return fmt.Errorf("beta-groups list: failed to fetch: %w", err)
 			}
@@ -318,27 +263,6 @@ Examples:
 			return shared.PrintOutput(groups, *output.Output, *output.Pretty)
 		},
 	}
-}
-
-// filterBetaGroupsByInternal keeps only groups whose isInternalGroup matches
-// internal, truncating to limit when limit > 0. The app-scoped endpoint cannot
-// filter server-side, so every page is fetched and the limit is applied here;
-// when that truncation drops matches, warn on stderr so callers know the
-// printed set is incomplete.
-func filterBetaGroupsByInternal(groups *asc.BetaGroupsResponse, internal bool, limit int) asc.BetaGroupsResponse {
-	filtered := *groups
-	filtered.Data = make([]asc.Resource[asc.BetaGroupAttributes], 0, len(groups.Data))
-	for _, g := range groups.Data {
-		if g.Attributes.IsInternalGroup == internal {
-			filtered.Data = append(filtered.Data, g)
-		}
-	}
-	if limit > 0 && len(filtered.Data) > limit {
-		total := len(filtered.Data)
-		filtered.Data = filtered.Data[:limit]
-		fmt.Fprintf(os.Stderr, "Warning: showing %d of %d filtered groups (--limit %d); rerun without --limit for all\n", limit, total, limit)
-	}
-	return filtered
 }
 
 // BuildGroupsListCommandConfig configures the build-centric beta-group lookup
