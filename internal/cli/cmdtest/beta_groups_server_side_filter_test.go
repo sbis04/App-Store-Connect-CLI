@@ -193,13 +193,13 @@ func TestBetaGroupsListAppScopedFilterPaginates(t *testing.T) {
 	}
 }
 
-// TestBetaGroupsListAppScopedFilterHonorsNext proves --next still short-circuits
-// to the cursor URL when a filter is requested.
-func TestBetaGroupsListAppScopedFilterHonorsNext(t *testing.T) {
+// TestBetaGroupsListNextStillPagesWithoutQueryFlags proves a bare --next keeps
+// following the cursor URL verbatim.
+func TestBetaGroupsListNextStillPagesWithoutQueryFlags(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	const nextURL = "https://api.appstoreconnect.apple.com/v1/betaGroups?cursor=page3&filter%5Bapp%5D=app-1"
+	const nextURL = "https://api.appstoreconnect.apple.com/v1/betaGroups?cursor=page3&filter%5Bapp%5D=app-1&filter%5BisInternalGroup%5D=true"
 	installDefaultTransport(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.String() != nextURL {
 			t.Errorf("request URL = %q, want %q", req.URL.String(), nextURL)
@@ -207,13 +207,36 @@ func TestBetaGroupsListAppScopedFilterHonorsNext(t *testing.T) {
 		return betaGroupsJSONResponse(`{"data":[]}`), nil
 	}))
 
-	stdout, stderr := runBetaGroupsList(t, "--app", "app-1", "--internal", "--next", nextURL)
+	stdout, stderr := runBetaGroupsList(t, "--next", nextURL)
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
 	if !strings.Contains(stdout, `"data":[]`) {
 		t.Fatalf("expected empty data envelope, got %q", stdout)
+	}
+}
+
+// TestBetaGroupsListNextRejectsQueryFlags proves query-shaping flags are not
+// accepted and silently discarded by the cursor URL.
+func TestBetaGroupsListNextRejectsQueryFlags(t *testing.T) {
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	const nextURL = "https://api.appstoreconnect.apple.com/v1/betaGroups?cursor=page3"
+	tests := []struct {
+		flag    []string
+		wantErr string
+	}{
+		{[]string{"--internal"}, "--next cannot be combined with --internal"},
+		{[]string{"--external"}, "--next cannot be combined with --external"},
+		{[]string{"--name", "Beta Testers"}, "--next cannot be combined with --name"},
+		{[]string{"--sort", "name"}, "--next cannot be combined with --sort"},
+	}
+	for _, test := range tests {
+		args := append([]string{"testflight", "groups", "list", "--next", nextURL}, test.flag...)
+		assertUsageExit(t, args, test.wantErr)
 	}
 }
 

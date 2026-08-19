@@ -107,6 +107,27 @@ func TestBetaGroupsListInvalidSortIsUsageError(t *testing.T) {
 	)
 }
 
+// TestBetaGroupsListBlankSortAndNameAreUsageErrors proves an explicitly blank
+// --name or --sort is reported instead of quietly widening the listing.
+func TestBetaGroupsListBlankSortAndNameAreUsageErrors(t *testing.T) {
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	tests := []struct {
+		args    []string
+		wantErr string
+	}{
+		{[]string{"testflight", "groups", "list", "--app", "app-1", "--sort", ""}, "--sort cannot be empty"},
+		{[]string{"testflight", "groups", "list", "--app", "app-1", "--sort", "   "}, "--sort cannot be empty"},
+		{[]string{"testflight", "groups", "list", "--app", "app-1", "--name", ""}, "--name cannot be empty"},
+		{[]string{"testflight", "groups", "list", "--app", "app-1", "--name", "   "}, "--name cannot be empty"},
+	}
+	for _, test := range tests {
+		assertUsageExit(t, test.args, test.wantErr)
+	}
+}
+
 // TestBetaGroupsListSortAndNameRejectedWithBuildID proves the membership lookup
 // does not silently ignore query flags it cannot honor.
 func TestBetaGroupsListSortAndNameRejectedWithBuildID(t *testing.T) {

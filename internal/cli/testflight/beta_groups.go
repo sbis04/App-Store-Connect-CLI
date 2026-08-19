@@ -116,6 +116,9 @@ filter[app]. Those filters are applied by App Store Connect, and --limit is the
 page size of matching groups. --name matches the exact group name.
 --build-id membership lookup accepts neither --name nor --sort.
 
+A links.next URL already carries the query it came from, so --next cannot be
+combined with --internal, --external, --name, or --sort.
+
 Examples:
   asc testflight beta-groups list --app "APP_ID"
   asc testflight beta-groups list --build-id "BUILD_ID"
@@ -143,11 +146,58 @@ Examples:
 			if err := shared.ValidateNextURL(*next); err != nil {
 				return fmt.Errorf("beta-groups list: %w", err)
 			}
+
+			appIDSet := false
+			buildIDSet := false
+			nameSet := false
+			sortSet := false
+			membershipPageControlSet := false
+			fs.Visit(func(value *flag.Flag) {
+				switch value.Name {
+				case "app":
+					appIDSet = true
+				case "build-id":
+					buildIDSet = true
+				case "name":
+					nameSet = true
+				case "sort":
+					sortSet = true
+				case "global", "limit", "next", "paginate":
+					membershipPageControlSet = true
+				}
+			})
+
 			sortValue := strings.TrimSpace(*sort)
+			if sortSet && sortValue == "" {
+				return shared.UsageError("beta-groups list: --sort cannot be empty")
+			}
 			if err := shared.ValidateSort(sortValue, betaGroupSortValues...); err != nil {
 				return shared.UsageError(err.Error())
 			}
 			nameValue := strings.TrimSpace(*name)
+			if nameSet && nameValue == "" {
+				return shared.UsageError("beta-groups list: --name cannot be empty")
+			}
+
+			// Both beta group reads follow a links.next URL verbatim, so any
+			// query-shaping flag passed alongside --next would be dropped
+			// without a trace. Reject the combination instead: the cursor URL
+			// already carries the filters and sort of the query it came from.
+			if strings.TrimSpace(*next) != "" {
+				for _, conflict := range []struct {
+					set  bool
+					name string
+				}{
+					{*internal, "--internal"},
+					{*external, "--external"},
+					{nameSet, "--name"},
+					{sortSet, "--sort"},
+				} {
+					if conflict.set {
+						return shared.UsageError("beta-groups list: --next cannot be combined with " + conflict.name)
+					}
+				}
+			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			resolvedBuildID := strings.TrimSpace(*buildID)
@@ -156,22 +206,6 @@ Examples:
 				fmt.Fprintln(os.Stderr, "Error: --internal and --external are mutually exclusive")
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
 			}
-			appIDSet := false
-			buildIDSet := false
-			membershipPageControlSet := false
-			membershipQueryControlSet := false
-			fs.Visit(func(value *flag.Flag) {
-				switch value.Name {
-				case "app":
-					appIDSet = true
-				case "build-id":
-					buildIDSet = true
-				case "global", "limit", "next", "paginate":
-					membershipPageControlSet = true
-				case "name", "sort":
-					membershipQueryControlSet = true
-				}
-			})
 			if buildIDSet && resolvedBuildID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --build-id cannot be empty")
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--build-id")
@@ -184,7 +218,7 @@ Examples:
 				fmt.Fprintln(os.Stderr, "Error: --global, --limit, --next, and --paginate cannot be used with --build-id; membership lookup always fetches all required pages")
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
 			}
-			if resolvedBuildID != "" && membershipQueryControlSet {
+			if resolvedBuildID != "" && (nameSet || sortSet) {
 				fmt.Fprintln(os.Stderr, "Error: --name and --sort cannot be used with --build-id; membership lookup queries the build's app relationships directly")
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
 			}
