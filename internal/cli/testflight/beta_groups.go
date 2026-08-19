@@ -17,6 +17,18 @@ import (
 
 const buildGroupMembershipTimeout = 5 * time.Minute
 
+// betaGroupSortValues lists the sort values GET /v1/betaGroups documents.
+var betaGroupSortValues = []string{
+	"name",
+	"-name",
+	"createdDate",
+	"-createdDate",
+	"publicLinkEnabled",
+	"-publicLinkEnabled",
+	"publicLinkLimit",
+	"-publicLinkLimit",
+}
+
 // BetaGroupsCommand returns the beta groups command with subcommands.
 func BetaGroupsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("beta-groups", flag.ExitOnError)
@@ -67,6 +79,8 @@ func BetaGroupsListCommand() *ffcli.Command {
 	global := fs.Bool("global", false, "List beta groups across all apps (top-level endpoint)")
 	internal := fs.Bool("internal", false, "Filter to internal groups only")
 	external := fs.Bool("external", false, "Filter to external groups only")
+	name := fs.String("name", "", "Filter to beta groups with this exact name")
+	sort := fs.String("sort", "", "Sort order ("+strings.Join(betaGroupSortValues, ", ")+")")
 	output := shared.BindOutputFlags(fs)
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
@@ -96,9 +110,11 @@ A complete lookup with no memberships prints an empty groups array and exits 0.
 If an inverse relationship cannot be read, available matches and failures are
 printed with complete=false and the command exits nonzero.
 
-GET /v1/apps/{id}/betaGroups accepts only a page limit, so --internal and
---external are served by GET /v1/betaGroups with filter[app]. The filter is
-applied by App Store Connect, and --limit is the page size of matching groups.
+GET /v1/apps/{id}/betaGroups accepts only a page limit, so --internal,
+--external, --name, and --sort are served by GET /v1/betaGroups with
+filter[app]. Those filters are applied by App Store Connect, and --limit is the
+page size of matching groups. --name matches the exact group name.
+--build-id membership lookup accepts neither --name nor --sort.
 
 Examples:
   asc testflight beta-groups list --app "APP_ID"
@@ -106,11 +122,14 @@ Examples:
   asc testflight beta-groups list --build-id "BUILD_ID" --internal
   asc testflight beta-groups list --app "APP_ID" --internal
   asc testflight beta-groups list --app "APP_ID" --external
+  asc testflight beta-groups list --app "APP_ID" --name "Beta Testers"
+  asc testflight beta-groups list --app "APP_ID" --sort "-createdDate"
   asc testflight beta-groups list --app "APP_ID" --limit 10
   asc testflight beta-groups list --app "APP_ID" --paginate
   asc testflight beta-groups list --global
   asc testflight beta-groups list --global --limit 50
-  asc testflight beta-groups list --global --internal`,
+  asc testflight beta-groups list --global --internal
+  asc testflight beta-groups list --global --sort "name"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -124,6 +143,11 @@ Examples:
 			if err := shared.ValidateNextURL(*next); err != nil {
 				return fmt.Errorf("beta-groups list: %w", err)
 			}
+			sortValue := strings.TrimSpace(*sort)
+			if err := shared.ValidateSort(sortValue, betaGroupSortValues...); err != nil {
+				return shared.UsageError(err.Error())
+			}
+			nameValue := strings.TrimSpace(*name)
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			resolvedBuildID := strings.TrimSpace(*buildID)
@@ -135,6 +159,7 @@ Examples:
 			appIDSet := false
 			buildIDSet := false
 			membershipPageControlSet := false
+			membershipQueryControlSet := false
 			fs.Visit(func(value *flag.Flag) {
 				switch value.Name {
 				case "app":
@@ -143,6 +168,8 @@ Examples:
 					buildIDSet = true
 				case "global", "limit", "next", "paginate":
 					membershipPageControlSet = true
+				case "name", "sort":
+					membershipQueryControlSet = true
 				}
 			})
 			if buildIDSet && resolvedBuildID == "" {
@@ -155,6 +182,10 @@ Examples:
 			}
 			if resolvedBuildID != "" && membershipPageControlSet {
 				fmt.Fprintln(os.Stderr, "Error: --global, --limit, --next, and --paginate cannot be used with --build-id; membership lookup always fetches all required pages")
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
+			}
+			if resolvedBuildID != "" && membershipQueryControlSet {
+				fmt.Fprintln(os.Stderr, "Error: --name and --sort cannot be used with --build-id; membership lookup queries the build's app relationships directly")
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
 			}
 
@@ -219,13 +250,19 @@ Examples:
 			if internalFilter != nil {
 				opts = append(opts, asc.WithBetaGroupsIsInternal(*internalFilter))
 			}
+			if nameValue != "" {
+				opts = append(opts, asc.WithBetaGroupsName(nameValue))
+			}
+			if sortValue != "" {
+				opts = append(opts, asc.WithBetaGroupsSort(sortValue))
+			}
 
 			// GET /v1/apps/{id}/betaGroups accepts only limit and
 			// fields[betaGroups]. GET /v1/betaGroups accepts filter[app]
-			// alongside filter[isInternalGroup], so any request that needs a
-			// server-side filter is routed there instead of being narrowed
-			// client-side after walking every page.
-			useTopLevelEndpoint := *global || internalFilter != nil
+			// alongside filter[isInternalGroup], filter[name], and sort, so any
+			// request that needs one of those is routed there instead of being
+			// narrowed client-side after walking every page.
+			useTopLevelEndpoint := *global || internalFilter != nil || nameValue != "" || sortValue != ""
 			if useTopLevelEndpoint && !*global && resolvedAppID != "" {
 				opts = append(opts, asc.WithBetaGroupsApps([]string{resolvedAppID}))
 			}
